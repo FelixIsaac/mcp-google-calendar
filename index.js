@@ -1,13 +1,11 @@
-#!/usr/bin/env node
+import * as dotenv from 'dotenv';
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { google } from 'googleapis';
+import { log, style } from './log.js';
 
-// Debug log utility
-function debugLog(...args) {
-    console.error('DEBUG:', new Date().toISOString(), ...args);
-}
+dotenv.config();
 
 // Define the create_event tool
 const CREATE_EVENT_TOOL = {
@@ -52,89 +50,103 @@ const server = new Server({
     },
 });
 
-debugLog('Server initialized');
+log.debug('Server initialized');
 
 // Check for required environment variables
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
+const GOOGLE_REFRESH_TOKEN = process.env.GOOGLE_REFRESH_TOKEN;
+const TIMEZONE = process.env.TIMEZONE || 'Asia/Singapore';
 
 if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET) {
-    console.error("Error: GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET environment variables are required");
+    log.error("GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET environment variables are required");
     process.exit(1);
+}
+
+if (!GOOGLE_REFRESH_TOKEN) {
+    log.error("GOOGLE_REFRESH_TOKEN environment variable is required");
+    process.exit(1);
+}
+
+function isValidISODate(dateStr) {
+    const date = new Date(dateStr);
+    return date instanceof Date && !isNaN(date) && dateStr.includes('T');
 }
 
 // Calendar event creation function
 async function createCalendarEvent(args) {
-    debugLog('Creating calendar event with args:', JSON.stringify(args, null, 2));
-    
+    if (!isValidISODate(args.start_time) || !isValidISODate(args.end_time)) {
+        throw new Error('Invalid date format. Please use ISO format (e.g., "2025-02-06T15:00:00Z")');
+    }
+    log.debug('Creating calendar event with args:', args);
+
     try {
-        debugLog('Creating OAuth2 client');
+        log.debug('Creating OAuth2 client');
         const oauth2Client = new google.auth.OAuth2(
             GOOGLE_CLIENT_ID,
             GOOGLE_CLIENT_SECRET,
             'http://localhost'
         );
-        debugLog('OAuth2 client created');
-        
-        debugLog('Setting credentials');
-        // Replace this with your refresh token obtained from auth.js
+        log.debug('OAuth2 client created');
+
+        log.debug('Setting credentials');
         oauth2Client.setCredentials({
-            refresh_token: "YOUR_REFRESH_TOKEN",
+            refresh_token: GOOGLE_REFRESH_TOKEN,
             token_uri: "https://oauth2.googleapis.com/token"
         });
-        debugLog('Credentials set');
+        log.debug('Credentials set');
 
-        debugLog('Creating calendar service');
-        const calendar = google.calendar({ 
+        log.debug('Creating calendar service');
+        const calendar = google.calendar({
             version: 'v3',
             auth: oauth2Client
         });
-        debugLog('Calendar service created');
-        
+        log.debug('Calendar service created');
+
         const event = {
             summary: args.summary,
             description: args.description,
             start: {
                 dateTime: args.start_time,
-                timeZone: 'America/New_York',
+                timeZone: TIMEZONE,
             },
             end: {
                 dateTime: args.end_time,
-                timeZone: 'America/New_York',
+                timeZone: TIMEZONE,
             }
         };
-        debugLog('Event object created:', JSON.stringify(event, null, 2));
+
+        log.debug('Event object created:', event);
 
         if (args.attendees) {
             event.attendees = args.attendees.map(email => ({ email }));
-            debugLog('Attendees added:', event.attendees);
+            log.debug('Attendees added:', event.attendees);
         }
 
-        debugLog('Attempting to insert event');
+        log.debug('Attempting to insert event');
         const response = await calendar.events.insert({
             calendarId: 'primary',
             requestBody: event,
         });
-        debugLog('Event insert response:', JSON.stringify(response.data, null, 2));
+        log.debug('Event insert response:', response.data);
         return `Event created: ${response.data.htmlLink}`;
     } catch (error) {
-        debugLog('ERROR OCCURRED:');
-        debugLog('Error name:', error.name);
-        debugLog('Error message:', error.message);
-        debugLog('Error stack:', error.stack);
+        log.debug('ERROR OCCURRED:');
+        log.debug('Error name:', error.name);
+        log.debug('Error message:', error.message);
+        log.debug('Error stack:', error.stack);
         throw new Error(`Failed to create event: ${error.message}`);
     }
 }
 
 // Tool handlers
-server.setRequestHandler(ListToolsRequestSchema, async () => {
-    debugLog('List tools request received');
-    return { tools: [CREATE_EVENT_TOOL] };
-});
+server.setRequestHandler(ListToolsRequestSchema, async () => ({
+    tools: [CREATE_EVENT_TOOL]  // Return tools directly in the handler
+}));
 
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
-    debugLog('Call tool request received:', JSON.stringify(request, null, 2));
-    
+    log.debug('Call tool request received:', request);
+
     try {
         const { name, arguments: args } = request.params;
         if (!args) {
@@ -143,23 +155,23 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         switch (name) {
             case "create_event": {
-                debugLog('Handling create_event request');
+                log.debug('Handling create_event request');
                 const result = await createCalendarEvent(args);
-                debugLog('Event creation successful:', result);
+                log.debug('Event creation successful:', result);
                 return {
                     content: [{ type: "text", text: result }],
                     isError: false,
                 };
             }
             default:
-                debugLog('Unknown tool requested:', name);
+                log.debug('Unknown tool requested:', name);
                 return {
                     content: [{ type: "text", text: `Unknown tool: ${name}` }],
                     isError: true,
                 };
         }
     } catch (error) {
-        debugLog('Error in call tool handler:', error);
+        log.debug('Error in call tool handler:', error);
         return {
             content: [
                 {
@@ -174,16 +186,22 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
 // Server startup function
 async function runServer() {
-    debugLog('Starting server');
+    log.debug('Starting server');
     const transport = new StdioServerTransport();
     await server.connect(transport);
-    debugLog('Server connected to transport');
-    console.error("Calendar MCP Server running on stdio");
+    log.debug('Server connected to transport');
+    log.info(style.cyan("Calendar MCP Server running on stdio"));
 }
 
 // Start the server
 runServer().catch((error) => {
-    debugLog('Fatal server error:', error);
-    console.error("Fatal error running server:", error);
+    log.debug('Fatal server error:', error);
+    log.error("Fatal error running server:", error);
+    process.exit(1);
+});
+
+// Handle unhandled promise rejections
+process.on('unhandledRejection', (error) => {
+    log.error('Unhandled promise rejection:', error);
     process.exit(1);
 });
